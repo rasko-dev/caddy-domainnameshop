@@ -1,8 +1,7 @@
 FROM caddy:2.11.3-builder AS builder
 
 RUN xcaddy build \
-    --with github.com/caddy-dns/domainnameshop \
-    --with github.com/greenpau/caddy-security
+    --with github.com/caddy-dns/domainnameshop
 
 FROM caddy:2.11.3
 
