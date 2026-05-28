@@ -64,7 +64,10 @@ jobs:
                 url = data.get("next")
 
             if not versions:
-                raise SystemExit("Could not find semantic versions on Docker Hub for library/caddy.")
+                raise SystemExit(
+                    "Could not find semantic versions on Docker Hub for library/caddy. "
+                    "Verify Docker Hub connectivity and repository availability."
+                )
 
             latest = max(versions)
             print(f"{latest[0]}.{latest[1]}.{latest[2]}")
@@ -81,7 +84,7 @@ jobs:
           latest_version="$(get_latest_version)"
 
           if [ -z "${resolved_version}" ] || [ "${resolved_version}" = "null" ]; then
-            echo "Could not resolve a Caddy version."
+            echo "Could not resolve a Caddy version from input or Docker Hub upstream tags."
             exit 1
           fi
 
@@ -149,7 +152,7 @@ jobs:
               local digest
               digest="$(echo "${out}" | awk '/^Digest:/ {print $2; exit}')"
               if [ -z "${digest}" ]; then
-                echo "Could not read digest for ${full_ref}" >&2
+                echo "Could not read digest for ${full_ref}. Inspect output: ${out}" >&2
                 return 1
               fi
               echo "${digest}"
