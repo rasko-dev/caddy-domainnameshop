@@ -13,7 +13,7 @@ on:
         required: false
         default: ''
   schedule:
-    - cron: '23 * * * *'
+    - cron: '23 0,12 * * *'
 
 env:
   # Use docker.io for Docker Hub if empty
@@ -41,12 +41,12 @@ jobs:
         id: caddy-version
         env:
           REQUESTED_CADDY_VERSION: ${{ github.event.inputs.caddy_version || '' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
           get_latest_version() {
-            curl -fsSL https://api.github.com/repos/caddyserver/caddy/releases/latest \
-              | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name','').lstrip('v'))"
+            gh api repos/caddyserver/caddy/releases/latest --jq '.tag_name' | sed 's/^v//'
           }
 
           requested="${REQUESTED_CADDY_VERSION#v}"

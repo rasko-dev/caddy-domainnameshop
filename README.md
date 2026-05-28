@@ -1,6 +1,6 @@
 This repo exists to build a docker image of Caddy with the [dns.providers.domainnameshop](https://github.com/caddy-dns/domainnameshop) module embedded.
 
-No guarantees that this will always remain up-to-date as it's updated manually.
+The published image is automatically checked and updated by CI when new upstream Caddy versions are released.
 
 The `docker-publish` workflow accepts an optional `caddy_version` input.
 
