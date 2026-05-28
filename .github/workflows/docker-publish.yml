@@ -41,6 +41,8 @@ jobs:
         env:
           REQUESTED_CADDY_VERSION: ${{ github.event.inputs.caddy_version || '' }}
           GITHUB_TOKEN: ${{ github.token }}
+          GHCR_REGISTRY: ${{ env.REGISTRY }}
+          GHCR_IMAGE: ${{ env.IMAGE_NAME }}
         run: |
           set -euo pipefail
 
@@ -76,6 +78,39 @@ jobs:
             echo "${latest_tag}"
           }
 
+          semver_gt() {
+            local left="$1"
+            local right="$2"
+            local left_major left_minor left_patch right_major right_minor right_patch
+
+            IFS='.' read -r left_major left_minor left_patch <<< "${left}"
+            IFS='.' read -r right_major right_minor right_patch <<< "${right}"
+
+            if [ "${left_major}" -gt "${right_major}" ]; then
+              return 0
+            fi
+            if [ "${left_major}" -lt "${right_major}" ]; then
+              return 1
+            fi
+            if [ "${left_minor}" -gt "${right_minor}" ]; then
+              return 0
+            fi
+            if [ "${left_minor}" -lt "${right_minor}" ]; then
+              return 1
+            fi
+            [ "${left_patch}" -gt "${right_patch}" ]
+          }
+
+          fetch_existing_tags() {
+            if [ "${GHCR_REGISTRY}" != "ghcr.io" ]; then
+              return 2
+            fi
+
+            curl -fsSL \
+              -u "x-access-token:${GITHUB_TOKEN}" \
+              "https://ghcr.io/v2/${GHCR_IMAGE}/tags/list?n=1000"
+          }
+
           requested="${REQUESTED_CADDY_VERSION#v}"
           if [ -n "${requested}" ]; then
             resolved_version="${requested}"
@@ -100,6 +135,50 @@ jobs:
           echo "version=${resolved_version}" >> "${GITHUB_OUTPUT}"
           echo "major_minor=${major}.${minor}" >> "${GITHUB_OUTPUT}"
           echo "major=${major}" >> "${GITHUB_OUTPUT}"
+
+          enable_major_minor=true
+          enable_major=true
+          if tags_json="$(fetch_existing_tags)"; then
+            newest_major_minor=""
+            newest_major=""
+            while IFS= read -r tag; do
+              if [[ ! "${tag}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+                continue
+              fi
+
+              tag_major="${BASH_REMATCH[1]}"
+              tag_minor="${BASH_REMATCH[2]}"
+
+              if [ "${tag_major}" = "${major}" ] && [ "${tag_minor}" = "${minor}" ]; then
+                if [ -z "${newest_major_minor}" ] || semver_gt "${tag}" "${newest_major_minor}"; then
+                  newest_major_minor="${tag}"
+                fi
+              fi
+
+              if [ "${tag_major}" = "${major}" ]; then
+                if [ -z "${newest_major}" ] || semver_gt "${tag}" "${newest_major}"; then
+                  newest_major="${tag}"
+                fi
+              fi
+            done < <(echo "${tags_json}" | jq -r '.tags[]?')
+
+            if [ -n "${newest_major_minor}" ] && semver_gt "${newest_major_minor}" "${resolved_version}"; then
+              enable_major_minor=false
+              echo "Skipping ${major}.${minor} rolling tag because ${newest_major_minor} is already published."
+            fi
+            if [ -n "${newest_major}" ] && semver_gt "${newest_major}" "${resolved_version}"; then
+              enable_major=false
+              echo "Skipping ${major} rolling tag because ${newest_major} is already published."
+            fi
+          else
+            status=$?
+            if [ "${status}" -ne 2 ]; then
+              echo "Could not inspect existing registry tags; keeping rolling tag updates enabled."
+            fi
+          fi
+
+          echo "enable_major_minor=${enable_major_minor}" >> "${GITHUB_OUTPUT}"
+          echo "enable_major=${enable_major}" >> "${GITHUB_OUTPUT}"
           if [ "${resolved_version}" = "${latest_version}" ]; then
             echo "is_latest=true" >> "${GITHUB_OUTPUT}"
           else
@@ -236,8 +315,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ steps.caddy-version.outputs.version }}
-            type=raw,value=${{ steps.caddy-version.outputs.major_minor }}
-            type=raw,value=${{ steps.caddy-version.outputs.major }}
+            type=raw,value=${{ steps.caddy-version.outputs.major_minor }},enable=${{ steps.caddy-version.outputs.enable_major_minor == 'true' }}
+            type=raw,value=${{ steps.caddy-version.outputs.major }},enable=${{ steps.caddy-version.outputs.enable_major == 'true' }}
             type=raw,value=latest,enable=${{ steps.caddy-version.outputs.is_latest == 'true' }}
 
       # Build and push Docker image with Buildx
