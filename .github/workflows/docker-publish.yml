@@ -41,7 +41,7 @@ jobs:
         env:
           REQUESTED_CADDY_VERSION: ${{ github.event.inputs.caddy_version || '' }}
           GITHUB_TOKEN: ${{ github.token }}
-          TARGET_REGISTRY: ${{ env.REGISTRY }}
+          TARGET_REGISTRY: ghcr.io
           GHCR_IMAGE: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -201,7 +201,7 @@ jobs:
           else
             status=$?
             if [ "${status}" -ne "${SKIP_FETCH_STATUS}" ]; then
-              echo "Could not inspect existing registry tags; keeping rolling tag updates enabled."
+              echo "Could not inspect existing registry tags (status ${status}); keeping rolling tag updates enabled."
             fi
           fi
           rm -f "${tags_file}"
