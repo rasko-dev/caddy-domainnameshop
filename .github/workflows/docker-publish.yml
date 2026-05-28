@@ -143,7 +143,7 @@ jobs:
           }
 
           if check_upstream_tag; then
-            :
+            echo "Upstream caddy:${TARGET_TAG} is available on Docker Hub."
           else
             status=$?
             if [ "${status}" -eq 2 ]; then
@@ -184,7 +184,7 @@ jobs:
           }
 
           if exact_digest="$(fetch_digest "${TARGET_TAG}")"; then
-            :
+            echo "Found digest for ${TARGET_TAG}, checking rolling tags."
           else
             status=$?
             if [ "${status}" -eq 2 ]; then
