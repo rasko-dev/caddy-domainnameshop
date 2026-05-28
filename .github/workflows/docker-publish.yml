@@ -14,6 +14,7 @@ on:
         default: ''
   schedule:
     # Run twice daily to catch new upstream releases without excessive CI churn.
+    # Use minute 23 to avoid more common top-of-hour scheduler spikes.
     - cron: '23 0,12 * * *'
 
 env:
@@ -116,12 +117,16 @@ jobs:
             exit 0
           fi
 
-          if docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TARGET_TAG}" >/dev/null 2>&1; then
+          image_ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TARGET_TAG}"
+          if inspect_output="$(docker buildx imagetools inspect "${image_ref}" 2>&1)"; then
             echo "Version ${TARGET_TAG} already published, skipping scheduled build."
             echo "should_build=false" >> "${GITHUB_OUTPUT}"
-          else
+          elif echo "${inspect_output}" | grep -Eqi "not found|manifest unknown|no such manifest"; then
             echo "Version ${TARGET_TAG} not published yet, building."
             echo "should_build=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Failed to check ${image_ref}: ${inspect_output}"
+            exit 1
           fi
 
       # Extract metadata (tags, labels) for Docker
