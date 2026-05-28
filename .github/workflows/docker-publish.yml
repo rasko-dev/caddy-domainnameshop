@@ -43,12 +43,32 @@ jobs:
         id: caddy-version
         env:
           REQUESTED_CADDY_VERSION: ${{ github.event.inputs.caddy_version || '' }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
           get_latest_version() {
-            gh api repos/caddyserver/caddy/releases/latest --jq '.tag_name' | sed 's/^v//'
+            python3 - <<'PY'
+            import json
+            import re
+            import urllib.request
+
+            url = "https://hub.docker.com/v2/repositories/library/caddy/tags?page_size=100&ordering=last_updated"
+            versions = []
+            while url:
+                with urllib.request.urlopen(url) as response:
+                    data = json.load(response)
+                for tag in data.get("results", []):
+                    name = tag.get("name", "")
+                    if re.fullmatch(r"\d+\.\d+\.\d+", name):
+                        versions.append(tuple(int(part) for part in name.split(".")))
+                url = data.get("next")
+
+            if not versions:
+                raise SystemExit("Could not find semantic versions on Docker Hub for library/caddy.")
+
+            latest = max(versions)
+            print(f"{latest[0]}.{latest[1]}.{latest[2]}")
+            PY
           }
 
           requested="${REQUESTED_CADDY_VERSION#v}"
@@ -109,6 +129,9 @@ jobs:
         id: build-needed
         env:
           TARGET_TAG: ${{ steps.caddy-version.outputs.version }}
+          TARGET_MAJOR_MINOR: ${{ steps.caddy-version.outputs.major_minor }}
+          TARGET_MAJOR: ${{ steps.caddy-version.outputs.major }}
+          TARGET_IS_LATEST: ${{ steps.caddy-version.outputs.is_latest }}
         run: |
           set -euo pipefail
 
@@ -117,17 +140,67 @@ jobs:
             exit 0
           fi
 
-          image_ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TARGET_TAG}"
-          if inspect_output="$(docker buildx imagetools inspect "${image_ref}" 2>&1)"; then
-            echo "Version ${TARGET_TAG} already published, skipping scheduled build."
-            echo "should_build=false" >> "${GITHUB_OUTPUT}"
-          elif echo "${inspect_output}" | grep -Eqi "not found|manifest unknown|no such manifest"; then
-            echo "Version ${TARGET_TAG} not published yet, building."
-            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+          fetch_digest() {
+            local tag="$1"
+            local out
+            local full_ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}"
+
+            if out="$(docker buildx imagetools inspect "${full_ref}" 2>&1)"; then
+              local digest
+              digest="$(echo "${out}" | awk '/^Digest:/ {print $2; exit}')"
+              if [ -z "${digest}" ]; then
+                echo "Could not read digest for ${full_ref}" >&2
+                return 1
+              fi
+              echo "${digest}"
+              return 0
+            fi
+
+            if echo "${out}" | grep -Eqi "not found|manifest unknown|no such manifest"; then
+              return 2
+            fi
+
+            echo "Failed to check ${full_ref}: ${out}" >&2
+            return 1
+          }
+
+          if exact_digest="$(fetch_digest "${TARGET_TAG}")"; then
+            :
           else
-            echo "Failed to check ${image_ref}: ${inspect_output}"
+            status=$?
+            if [ "${status}" -eq 2 ]; then
+              echo "Version ${TARGET_TAG} not published yet, building."
+              echo "should_build=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
             exit 1
           fi
+
+          check_tags=("${TARGET_MAJOR_MINOR}" "${TARGET_MAJOR}")
+          if [ "${TARGET_IS_LATEST}" = "true" ]; then
+            check_tags+=("latest")
+          fi
+
+          for tag in "${check_tags[@]}"; do
+            if tag_digest="$(fetch_digest "${tag}")"; then
+              if [ "${tag_digest}" != "${exact_digest}" ]; then
+                echo "Tag ${tag} digest differs from ${TARGET_TAG}, rebuilding."
+                echo "should_build=true" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+            else
+              status=$?
+              if [ "${status}" -eq 2 ]; then
+                echo "Tag ${tag} is missing, rebuilding."
+                echo "should_build=true" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+              exit 1
+            fi
+          done
+
+          echo "Version ${TARGET_TAG} and rolling tags are up to date, skipping scheduled build."
+          echo "should_build=false" >> "${GITHUB_OUTPUT}"
 
       # Extract metadata (tags, labels) for Docker
       # https://github.com/docker/metadata-action
