@@ -1,0 +1,34 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 259B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/caddy:2.11.3
+#2 DONE 0.1s
+
+#3 [internal] load metadata for docker.io/library/caddy:2.11.3-builder
+#3 DONE 0.1s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [builder 1/2] FROM docker.io/library/caddy:2.11.3-builder@sha256:f96a3b748f2ce4e5f6595453615da734b93993b231213fe35d0673893b5613ef
+#5 DONE 0.0s
+
+#6 [stage-1 1/2] FROM docker.io/library/caddy:2.11.3@sha256:ec18ee54aab3315c22e25f3b2babda73ff8007d39b13b3bd1bfffa2f0444c7d9
+#6 DONE 0.0s
+
+#7 [builder 2/2] RUN xcaddy build     --with github.com/caddy-dns/domainnameshop
+#7 CACHED
+
+#8 [stage-1 2/2] COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+#8 CACHED
+
+#9 exporting to image
+#9 exporting layers done
+#9 writing image sha256:3d0628c0b734c6362f3396f021f695c124b293ddfcd4800f79bcebfff927c256 done
+#9 naming to docker.io/library/caddy-domainnameshop:test
+#9 naming to docker.io/library/caddy-domainnameshop:test done
+#9 DONE 0.0s

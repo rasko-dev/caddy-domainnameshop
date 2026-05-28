@@ -5,7 +5,17 @@ name: Docker
 # separate terms of service, privacy policy, and support
 # documentation.
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      caddy_version:
+        description: Upstream Caddy image version (for example 2.11.3)
+        required: false
+        default: ''
+  schedule:
+    # Run twice daily to catch new upstream releases without excessive CI churn.
+    # Use minute 23 to avoid more common top-of-hour scheduler spikes.
+    - cron: '23 0,12 * * *'
 
 env:
   # Use docker.io for Docker Hub if empty
@@ -28,6 +38,76 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve Caddy version
+        id: caddy-version
+        env:
+          REQUESTED_CADDY_VERSION: ${{ github.event.inputs.caddy_version || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          get_latest_version() {
+            local latest_tag
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              latest_tag="$(
+                curl -fsSL \
+                  -u "x-access-token:${GITHUB_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  -H "User-Agent: caddy-domainnameshop-workflow" \
+                  "https://api.github.com/repos/caddyserver/caddy/releases/latest" \
+                  | jq -r '.tag_name // empty'
+              )"
+            else
+              latest_tag="$(
+                curl -fsSL \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  -H "User-Agent: caddy-domainnameshop-workflow" \
+                  "https://api.github.com/repos/caddyserver/caddy/releases/latest" \
+                  | jq -r '.tag_name // empty'
+              )"
+            fi
+
+            latest_tag="${latest_tag#v}"
+            if [[ ! "${latest_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Could not resolve semantic latest Caddy release tag from GitHub API." >&2
+              return 1
+            fi
+
+            echo "${latest_tag}"
+          }
+
+          requested="${REQUESTED_CADDY_VERSION#v}"
+          if [ -n "${requested}" ]; then
+            resolved_version="${requested}"
+          else
+            resolved_version="$(get_latest_version)"
+          fi
+
+          latest_version="$(get_latest_version)"
+
+          if [ -z "${resolved_version}" ] || [ "${resolved_version}" = "null" ]; then
+            echo "Could not resolve a Caddy version from input or GitHub upstream releases."
+            exit 1
+          fi
+
+          if [[ ! "${resolved_version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Resolved version '${resolved_version}' is not a supported release version (major.minor.patch)."
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+
+          echo "version=${resolved_version}" >> "${GITHUB_OUTPUT}"
+          echo "major_minor=${major}.${minor}" >> "${GITHUB_OUTPUT}"
+          echo "major=${major}" >> "${GITHUB_OUTPUT}"
+          if [ "${resolved_version}" = "${latest_version}" ]; then
+            echo "is_latest=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "is_latest=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       # Install the cosign tool except on PR
       # https://github.com/sigstore/cosign-installer
@@ -53,22 +133,136 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Decide whether image build is needed
+        id: build-needed
+        env:
+          TARGET_TAG: ${{ steps.caddy-version.outputs.version }}
+          TARGET_MAJOR_MINOR: ${{ steps.caddy-version.outputs.major_minor }}
+          TARGET_MAJOR: ${{ steps.caddy-version.outputs.major }}
+          TARGET_IS_LATEST: ${{ steps.caddy-version.outputs.is_latest }}
+        run: |
+          set -euo pipefail
+
+          check_upstream_tag() {
+            local out
+            local upstream_ref="docker.io/library/caddy:${TARGET_TAG}"
+
+            if out="$(docker buildx imagetools inspect "${upstream_ref}" 2>&1)"; then
+              return 0
+            fi
+
+            if echo "${out}" | grep -Eqi "not found|manifest unknown|no such manifest"; then
+              return 2
+            fi
+
+            echo "Failed to check upstream image ${upstream_ref}: ${out}" >&2
+            return 1
+          }
+
+          if check_upstream_tag; then
+            echo "Upstream caddy:${TARGET_TAG} is available on Docker Hub."
+          else
+            status=$?
+            if [ "${status}" -eq 2 ]; then
+              echo "Upstream caddy:${TARGET_TAG} is not available yet on Docker Hub; skipping build for now."
+              echo "should_build=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          fetch_digest() {
+            local tag="$1"
+            local out
+            local full_ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}"
+
+            if out="$(docker buildx imagetools inspect "${full_ref}" --format '{{json .Manifest}}' 2>&1)"; then
+              local digest
+              digest="$(echo "${out}" | jq -r '.digest // empty')"
+              if [ -z "${digest}" ]; then
+                echo "Could not read digest for ${full_ref}. Inspect output: ${out}" >&2
+                return 1
+              fi
+              echo "${digest}"
+              return 0
+            fi
+
+            if echo "${out}" | grep -Eqi "not found|manifest unknown|no such manifest"; then
+              return 2
+            fi
+
+            echo "Failed to check ${full_ref}: ${out}" >&2
+            return 1
+          }
+
+          if exact_digest="$(fetch_digest "${TARGET_TAG}")"; then
+            echo "Found digest for ${TARGET_TAG}, checking rolling tags."
+          else
+            status=$?
+            if [ "${status}" -eq 2 ]; then
+              echo "Version ${TARGET_TAG} not published yet, building."
+              echo "should_build=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            exit 1
+          fi
+
+          check_tags=("${TARGET_MAJOR_MINOR}" "${TARGET_MAJOR}")
+          if [ "${TARGET_IS_LATEST}" = "true" ]; then
+            check_tags+=("latest")
+          fi
+
+          for tag in "${check_tags[@]}"; do
+            if tag_digest="$(fetch_digest "${tag}")"; then
+              if [ "${tag_digest}" != "${exact_digest}" ]; then
+                echo "Tag ${tag} digest differs from ${TARGET_TAG}, rebuilding."
+                echo "should_build=true" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+            else
+              status=$?
+              if [ "${status}" -eq 2 ]; then
+                echo "Tag ${tag} is missing, rebuilding."
+                echo "should_build=true" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+              exit 1
+            fi
+          done
+
+          echo "Version ${TARGET_TAG} and rolling tags are up to date, skipping scheduled build."
+          echo "should_build=false" >> "${GITHUB_OUTPUT}"
+
       # Extract metadata (tags, labels) for Docker
       # https://github.com/docker/metadata-action
       - name: Extract Docker metadata
+        if: steps.build-needed.outputs.should_build == 'true'
         id: meta
         uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.caddy-version.outputs.version }}
+            type=raw,value=${{ steps.caddy-version.outputs.major_minor }}
+            type=raw,value=${{ steps.caddy-version.outputs.major }}
+            type=raw,value=latest,enable=${{ steps.caddy-version.outputs.is_latest == 'true' }}
 
       # Build and push Docker image with Buildx (don't push on PR)
       # https://github.com/docker/build-push-action
       - name: Build and push Docker image
+        if: steps.build-needed.outputs.should_build == 'true'
         id: build-and-push
         uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            CADDY_VERSION=${{ steps.caddy-version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -80,7 +274,7 @@ jobs:
       # transparency data even for private images, pass --force to cosign below.
       # https://github.com/sigstore/cosign
       - name: Sign the published Docker image
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' && steps.build-needed.outputs.should_build == 'true' }}
         env:
           # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
           TAGS: ${{ steps.meta.outputs.tags }}
