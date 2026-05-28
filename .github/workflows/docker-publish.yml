@@ -137,6 +137,10 @@ jobs:
             local right="$2"
             local left_major left_minor left_patch right_major right_minor right_patch
 
+            if [[ ! "${left}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ ! "${right}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              return 1
+            fi
+
             IFS='.' read -r left_major left_minor left_patch <<< "${left}"
             IFS='.' read -r right_major right_minor right_patch <<< "${right}"
 
@@ -223,9 +227,12 @@ jobs:
               return 1
             fi
 
-            if [ "${tagged_version}" != "${TARGET_TAG}" ]; then
-              echo "Tag ${tag} currently maps to ${tagged_version}; enabling update to ${TARGET_TAG}."
+            if [ "${tagged_version}" = "${TARGET_TAG}" ]; then
+              echo "Tag ${tag} already maps to ${TARGET_TAG}; no update needed."
+              return 1
             fi
+
+            echo "Tag ${tag} currently maps to ${tagged_version}; enabling update to ${TARGET_TAG}."
             return 0
           }
 
@@ -238,9 +245,7 @@ jobs:
           if major_minor_version="$(fetch_built_version_label "${TARGET_MAJOR_MINOR}")"; then
             if enable_tag "${TARGET_MAJOR_MINOR}" "${major_minor_version}"; then
               enable_major_minor=true
-              if [ "${major_minor_version}" != "${TARGET_TAG}" ]; then
-                rolling_needs_update=true
-              fi
+              rolling_needs_update=true
             fi
           else
             status=$?
@@ -257,9 +262,7 @@ jobs:
           if major_version="$(fetch_built_version_label "${TARGET_MAJOR}")"; then
             if enable_tag "${TARGET_MAJOR}" "${major_version}"; then
               enable_major=true
-              if [ "${major_version}" != "${TARGET_TAG}" ]; then
-                rolling_needs_update=true
-              fi
+              rolling_needs_update=true
             fi
           else
             status=$?
@@ -277,9 +280,7 @@ jobs:
             if latest_version="$(fetch_built_version_label "latest")"; then
               if enable_tag "latest" "${latest_version}"; then
                 enable_latest=true
-                if [ "${latest_version}" != "${TARGET_TAG}" ]; then
-                  rolling_needs_update=true
-                fi
+                rolling_needs_update=true
               fi
             else
               status=$?
@@ -300,6 +301,11 @@ jobs:
           if exact_version="$(fetch_built_version_label "${TARGET_TAG}")"; then
             if [ -z "${exact_version}" ]; then
               echo "Version ${TARGET_TAG} exists but has no recorded upstream version label, rebuilding."
+              echo "should_build=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            if [ "${exact_version}" != "${TARGET_TAG}" ]; then
+              echo "Version ${TARGET_TAG} has mismatched label ${exact_version}, rebuilding."
               echo "should_build=true" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
