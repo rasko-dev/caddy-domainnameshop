@@ -5,13 +5,20 @@ name: Docker
 # separate terms of service, privacy policy, and support
 # documentation.
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      caddy_version:
+        description: Upstream Caddy image version (for example 2.11.3)
+        required: true
+        default: '2.11.3'
 
 env:
   # Use docker.io for Docker Hub if empty
   REGISTRY: ghcr.io
   # github.repository as <account>/<repo>
   IMAGE_NAME: ${{ github.repository }}
+  CADDY_VERSION: ${{ inputs.caddy_version }}
 
 
 jobs:
@@ -60,6 +67,8 @@ jobs:
         uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.CADDY_VERSION }}
 
       # Build and push Docker image with Buildx (don't push on PR)
       # https://github.com/docker/build-push-action
@@ -69,6 +78,8 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            CADDY_VERSION=${{ env.CADDY_VERSION }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
