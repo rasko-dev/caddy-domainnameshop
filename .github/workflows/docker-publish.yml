@@ -43,15 +43,32 @@ jobs:
         id: caddy-version
         env:
           REQUESTED_CADDY_VERSION: ${{ github.event.inputs.caddy_version || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           get_latest_version() {
             local latest_tag
-            latest_tag="$(
-              curl -fsSL "https://api.github.com/repos/caddyserver/caddy/releases/latest" \
-                | awk -F'"' '/"tag_name":/ {print $4; exit}'
-            )"
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              latest_tag="$(
+                curl -fsSL \
+                  -u "x-access-token:${GITHUB_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  -H "User-Agent: caddy-domainnameshop-workflow" \
+                  "https://api.github.com/repos/caddyserver/caddy/releases/latest" \
+                  | jq -r '.tag_name // empty'
+              )"
+            else
+              latest_tag="$(
+                curl -fsSL \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  -H "User-Agent: caddy-domainnameshop-workflow" \
+                  "https://api.github.com/repos/caddyserver/caddy/releases/latest" \
+                  | jq -r '.tag_name // empty'
+              )"
+            fi
 
             latest_tag="${latest_tag#v}"
             if [[ ! "${latest_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -164,9 +181,9 @@ jobs:
             local out
             local full_ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}"
 
-            if out="$(docker buildx imagetools inspect "${full_ref}" 2>&1)"; then
+            if out="$(docker buildx imagetools inspect "${full_ref}" --format '{{json .Manifest}}' 2>&1)"; then
               local digest
-              digest="$(echo "${out}" | awk '/^Digest:/ {print $2; exit}')"
+              digest="$(echo "${out}" | jq -r '.digest // empty')"
               if [ -z "${digest}" ]; then
                 echo "Could not read digest for ${full_ref}. Inspect output: ${out}" >&2
                 return 1
