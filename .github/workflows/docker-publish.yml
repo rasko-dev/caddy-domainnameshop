@@ -41,7 +41,7 @@ jobs:
         env:
           REQUESTED_CADDY_VERSION: ${{ github.event.inputs.caddy_version || '' }}
           GITHUB_TOKEN: ${{ github.token }}
-          GHCR_REGISTRY: ghcr.io
+          TARGET_REGISTRY: ${{ env.REGISTRY }}
           GHCR_IMAGE: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -103,15 +103,38 @@ jobs:
           }
 
           fetch_existing_tags() {
-            if [ "${GHCR_REGISTRY}" != "ghcr.io" ]; then
+            if [ "${TARGET_REGISTRY}" != "ghcr.io" ]; then
               return "${SKIP_FETCH_STATUS}"
             fi
 
-            # Request a large page size so rolling-tag guard logic can compare against
-            # previously published semantic tags without following pagination.
-            curl -fsSL \
-              -u "x-access-token:${GITHUB_TOKEN}" \
-              "https://ghcr.io/v2/${GHCR_IMAGE}/tags/list?n=1000"
+            local next_url="https://ghcr.io/v2/${GHCR_IMAGE}/tags/list?n=100"
+            while [ -n "${next_url}" ]; do
+              local headers_file
+              local tags_response
+              headers_file="$(mktemp)"
+              tags_response="$(
+                curl -fsSL \
+                  -D "${headers_file}" \
+                  -u "x-access-token:${GITHUB_TOKEN}" \
+                  "${next_url}"
+              )"
+
+              echo "${tags_response}" | jq -r '.tags[]?'
+
+              next_url="$(
+                awk '
+                  BEGIN { IGNORECASE = 1 }
+                  /^Link:/ {
+                    if (match($0, /<[^>]+>/)) {
+                      print substr($0, RSTART + 1, RLENGTH - 2)
+                    }
+                  }
+                ' "${headers_file}" \
+                | tr -d "\r" \
+                | head -n1
+              )"
+              rm -f "${headers_file}"
+            done
           }
 
           requested="${REQUESTED_CADDY_VERSION#v}"
@@ -141,10 +164,12 @@ jobs:
 
           enable_major_minor=true
           enable_major=true
-          if tags_json="$(fetch_existing_tags)"; then
+          tags_file="$(mktemp)"
+          if fetch_existing_tags >"${tags_file}"; then
             newest_major_minor=""
             newest_major=""
-            while IFS= read -r tag; do
+            while IFS= read -r raw_tag; do
+              tag="${raw_tag#v}"
               if [[ ! "${tag}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
                 continue
               fi
@@ -163,7 +188,7 @@ jobs:
                   newest_major="${tag}"
                 fi
               fi
-            done < <(echo "${tags_json}" | jq -r '.tags[]?')
+            done < "${tags_file}"
 
             if [ -n "${newest_major_minor}" ] && semver_gt "${newest_major_minor}" "${resolved_version}"; then
               enable_major_minor=false
@@ -179,6 +204,7 @@ jobs:
               echo "Could not inspect existing registry tags; keeping rolling tag updates enabled."
             fi
           fi
+          rm -f "${tags_file}"
 
           echo "enable_major_minor=${enable_major_minor}" >> "${GITHUB_OUTPUT}"
           echo "enable_major=${enable_major}" >> "${GITHUB_OUTPUT}"
