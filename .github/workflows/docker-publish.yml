@@ -189,7 +189,7 @@ jobs:
             local full_ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}"
             local inspected_version
 
-            if docker pull "${full_ref}" >/dev/null 2>&1; then
+            if out="$(docker pull "${full_ref}" 2>&1)"; then
               inspected_version="$(
                 docker inspect \
                   --format '{{ index .Config.Labels "'"${VERSION_LABEL}"'" }}' \
@@ -201,7 +201,6 @@ jobs:
               return 0
             fi
 
-            out="$(docker pull "${full_ref}" 2>&1 || true)"
             if echo "${out}" | grep -Eqi "not found|manifest unknown|no such manifest"; then
               return 2
             fi
@@ -212,20 +211,20 @@ jobs:
 
           enable_tag() {
             local tag="$1"
-            local existing_version="$2"
+            local tagged_version="$2"
 
-            if [ -z "${existing_version}" ]; then
+            if [ -z "${tagged_version}" ]; then
               echo "Tag ${tag} has no recorded upstream version label; enabling update."
               return 0
             fi
 
-            if semver_gt "${existing_version}" "${TARGET_TAG}"; then
-              echo "Skipping ${tag} because existing label ${existing_version} is newer than ${TARGET_TAG}."
+            if semver_gt "${tagged_version}" "${TARGET_TAG}"; then
+              echo "Skipping ${tag} because existing label ${tagged_version} is newer than ${TARGET_TAG}."
               return 1
             fi
 
-            if [ "${existing_version}" != "${TARGET_TAG}" ]; then
-              echo "Tag ${tag} currently maps to ${existing_version}; enabling update to ${TARGET_TAG}."
+            if [ "${tagged_version}" != "${TARGET_TAG}" ]; then
+              echo "Tag ${tag} currently maps to ${tagged_version}; enabling update to ${TARGET_TAG}."
             fi
             return 0
           }
