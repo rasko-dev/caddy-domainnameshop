@@ -41,11 +41,8 @@ jobs:
         env:
           REQUESTED_CADDY_VERSION: ${{ github.event.inputs.caddy_version || '' }}
           GITHUB_TOKEN: ${{ github.token }}
-          TARGET_REGISTRY: ghcr.io
-          GHCR_IMAGE: ${{ github.repository }}
         run: |
           set -euo pipefail
-          SKIP_FETCH_STATUS=2
 
           get_latest_version() {
             local latest_tag
@@ -102,36 +99,44 @@ jobs:
             [ "${left_patch}" -gt "${right_patch}" ]
           }
 
-          fetch_existing_tags() {
-            if [ "${TARGET_REGISTRY}" != "ghcr.io" ]; then
-              return "${SKIP_FETCH_STATUS}"
-            fi
-
-            local next_url="https://ghcr.io/v2/${GHCR_IMAGE}/tags/list?n=100"
+          fetch_release_versions() {
+            local next_url="https://api.github.com/repos/caddyserver/caddy/releases?per_page=100"
             while [ -n "${next_url}" ]; do
               local headers_file
-              local tags_response
+              local response
               headers_file="$(mktemp)"
-              tags_response="$(
-                curl -fsSL \
-                  -D "${headers_file}" \
-                  -u "x-access-token:${GITHUB_TOKEN}" \
-                  "${next_url}"
-              )"
 
-              echo "${tags_response}" | jq -r '.tags[]?'
+              if [ -n "${GITHUB_TOKEN:-}" ]; then
+                response="$(
+                  curl -fsSL \
+                    -D "${headers_file}" \
+                    -u "x-access-token:${GITHUB_TOKEN}" \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                    -H "User-Agent: caddy-domainnameshop-workflow" \
+                    "${next_url}"
+                )"
+              else
+                response="$(
+                  curl -fsSL \
+                    -D "${headers_file}" \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                    -H "User-Agent: caddy-domainnameshop-workflow" \
+                    "${next_url}"
+                )"
+              fi
+
+              echo "${response}" \
+                | jq -r '.[] | select((.draft // false) == false and (.prerelease // false) == false) | .tag_name // empty' \
+                | sed 's/^v//'
 
               next_url="$(
-                awk '
-                  BEGIN { IGNORECASE = 1 }
-                  /^Link:/ {
-                    if (match($0, /<[^>]+>/)) {
-                      print substr($0, RSTART + 1, RLENGTH - 2)
-                    }
-                  }
-                ' "${headers_file}" \
-                | tr -d "\r" \
-                | head -n1
+                grep -i '^link:' "${headers_file}" \
+                  | tr ',' '\n' \
+                  | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' \
+                  | head -n1 \
+                  | tr -d '\r'
               )"
               rm -f "${headers_file}"
             done
@@ -165,7 +170,7 @@ jobs:
           enable_major_minor=true
           enable_major=true
           tags_file="$(mktemp)"
-          if fetch_existing_tags >"${tags_file}"; then
+          if fetch_release_versions >"${tags_file}"; then
             newest_major_minor=""
             newest_major=""
             while IFS= read -r raw_tag; do
@@ -192,17 +197,14 @@ jobs:
 
             if [ -n "${newest_major_minor}" ] && semver_gt "${newest_major_minor}" "${resolved_version}"; then
               enable_major_minor=false
-              echo "Skipping ${major}.${minor} rolling tag because ${newest_major_minor} is already published."
+              echo "Skipping ${major}.${minor} rolling tag because upstream ${newest_major_minor} is newer."
             fi
             if [ -n "${newest_major}" ] && semver_gt "${newest_major}" "${resolved_version}"; then
               enable_major=false
-              echo "Skipping ${major} rolling tag because ${newest_major} is already published."
+              echo "Skipping ${major} rolling tag because upstream ${newest_major} is newer."
             fi
           else
-            status=$?
-            if [ "${status}" -ne "${SKIP_FETCH_STATUS}" ]; then
-              echo "Could not inspect existing registry tags (status ${status}); keeping rolling tag updates enabled."
-            fi
+            echo "Could not inspect upstream releases; keeping rolling tag updates enabled."
           fi
           rm -f "${tags_file}"
 
