@@ -10,6 +10,6 @@ The `docker-publish` workflow accepts an optional `caddy_version` input.
 - Published images include the `io.github.rasko-dev.caddy-version` label with the embedded upstream Caddy `major.minor.patch`.
 - Published tags include `major.minor.patch`, `major.minor`, `major`, and `latest` (only when building the current latest upstream release).
 - Rolling tags are only updated when their embedded `io.github.rasko-dev.caddy-version` label is older than the version being built, or when that label is missing/invalid (invalid = not `major.minor.patch`, to migrate older images).
-- A scheduled run checks for new upstream versions and automatically builds when the target version is missing or rolling tags need updates.
+- Every run (scheduled or manual) checks for new upstream versions and only builds when the target version is missing, mismatched, or rolling tags need updates.
 
 The Dockerfile requires `CADDY_VERSION` to be provided as a build argument, and the workflow always supplies the resolved version explicitly.

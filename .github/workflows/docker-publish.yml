@@ -320,18 +320,13 @@ jobs:
             exit 1
           fi
 
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "should_build=true" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
           if [ "${rolling_needs_update}" = "true" ]; then
             echo "Rolling tags require update, rebuilding."
             echo "should_build=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          echo "Version ${TARGET_TAG} and enabled rolling tags are up to date, skipping scheduled build."
+          echo "Version ${TARGET_TAG} and enabled rolling tags are up to date, skipping build."
           echo "should_build=false" >> "${GITHUB_OUTPUT}"
 
       # Extract metadata (tags, labels) for Docker
