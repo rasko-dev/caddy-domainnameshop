@@ -7,4 +7,7 @@ RUN xcaddy build \
 
 FROM caddy:${CADDY_VERSION}
 
+ARG CADDY_VERSION
+LABEL io.github.rasko-dev.caddy-version="${CADDY_VERSION}"
+
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy

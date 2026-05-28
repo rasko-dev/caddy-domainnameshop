@@ -76,72 +76,6 @@ jobs:
             echo "${latest_tag}"
           }
 
-          semver_gt() {
-            local left="$1"
-            local right="$2"
-            local left_major left_minor left_patch right_major right_minor right_patch
-
-            IFS='.' read -r left_major left_minor left_patch <<< "${left}"
-            IFS='.' read -r right_major right_minor right_patch <<< "${right}"
-
-            if [ "${left_major}" -gt "${right_major}" ]; then
-              return 0
-            fi
-            if [ "${left_major}" -lt "${right_major}" ]; then
-              return 1
-            fi
-            if [ "${left_minor}" -gt "${right_minor}" ]; then
-              return 0
-            fi
-            if [ "${left_minor}" -lt "${right_minor}" ]; then
-              return 1
-            fi
-            [ "${left_patch}" -gt "${right_patch}" ]
-          }
-
-          fetch_release_versions() {
-            local next_url="https://api.github.com/repos/caddyserver/caddy/releases?per_page=100"
-            while [ -n "${next_url}" ]; do
-              local headers_file
-              local response
-              headers_file="$(mktemp)"
-
-              if [ -n "${GITHUB_TOKEN:-}" ]; then
-                response="$(
-                  curl -fsSL \
-                    -D "${headers_file}" \
-                    -u "x-access-token:${GITHUB_TOKEN}" \
-                    -H "Accept: application/vnd.github+json" \
-                    -H "X-GitHub-Api-Version: 2022-11-28" \
-                    -H "User-Agent: caddy-domainnameshop-workflow" \
-                    "${next_url}"
-                )"
-              else
-                response="$(
-                  curl -fsSL \
-                    -D "${headers_file}" \
-                    -H "Accept: application/vnd.github+json" \
-                    -H "X-GitHub-Api-Version: 2022-11-28" \
-                    -H "User-Agent: caddy-domainnameshop-workflow" \
-                    "${next_url}"
-                )"
-              fi
-
-              echo "${response}" \
-                | jq -r '.[] | select((.draft // false) == false and (.prerelease // false) == false) | .tag_name // empty' \
-                | sed 's/^v//'
-
-              next_url="$(
-                grep -i '^link:' "${headers_file}" \
-                  | tr ',' '\n' \
-                  | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' \
-                  | head -n1 \
-                  | tr -d '\r'
-              )"
-              rm -f "${headers_file}"
-            done
-          }
-
           requested="${REQUESTED_CADDY_VERSION#v}"
           if [ -n "${requested}" ]; then
             resolved_version="${requested}"
@@ -166,50 +100,6 @@ jobs:
           echo "version=${resolved_version}" >> "${GITHUB_OUTPUT}"
           echo "major_minor=${major}.${minor}" >> "${GITHUB_OUTPUT}"
           echo "major=${major}" >> "${GITHUB_OUTPUT}"
-
-          enable_major_minor=true
-          enable_major=true
-          tags_file="$(mktemp)"
-          if fetch_release_versions >"${tags_file}"; then
-            newest_major_minor=""
-            newest_major=""
-            while IFS= read -r raw_tag; do
-              tag="${raw_tag#v}"
-              if [[ ! "${tag}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-                continue
-              fi
-
-              tag_major="${BASH_REMATCH[1]}"
-              tag_minor="${BASH_REMATCH[2]}"
-
-              if [ "${tag_major}" = "${major}" ] && [ "${tag_minor}" = "${minor}" ]; then
-                if [ -z "${newest_major_minor}" ] || semver_gt "${tag}" "${newest_major_minor}"; then
-                  newest_major_minor="${tag}"
-                fi
-              fi
-
-              if [ "${tag_major}" = "${major}" ]; then
-                if [ -z "${newest_major}" ] || semver_gt "${tag}" "${newest_major}"; then
-                  newest_major="${tag}"
-                fi
-              fi
-            done < "${tags_file}"
-
-            if [ -n "${newest_major_minor}" ] && semver_gt "${newest_major_minor}" "${resolved_version}"; then
-              enable_major_minor=false
-              echo "Skipping ${major}.${minor} rolling tag because upstream ${newest_major_minor} is newer."
-            fi
-            if [ -n "${newest_major}" ] && semver_gt "${newest_major}" "${resolved_version}"; then
-              enable_major=false
-              echo "Skipping ${major} rolling tag because upstream ${newest_major} is newer."
-            fi
-          else
-            echo "Could not inspect upstream releases; keeping rolling tag updates enabled."
-          fi
-          rm -f "${tags_file}"
-
-          echo "enable_major_minor=${enable_major_minor}" >> "${GITHUB_OUTPUT}"
-          echo "enable_major=${enable_major}" >> "${GITHUB_OUTPUT}"
           if [ "${resolved_version}" = "${latest_version}" ]; then
             echo "is_latest=true" >> "${GITHUB_OUTPUT}"
           else
@@ -238,8 +128,32 @@ jobs:
           TARGET_MAJOR_MINOR: ${{ steps.caddy-version.outputs.major_minor }}
           TARGET_MAJOR: ${{ steps.caddy-version.outputs.major }}
           TARGET_IS_LATEST: ${{ steps.caddy-version.outputs.is_latest }}
+          VERSION_LABEL: io.github.rasko-dev.caddy-version
         run: |
           set -euo pipefail
+
+          semver_gt() {
+            local left="$1"
+            local right="$2"
+            local left_major left_minor left_patch right_major right_minor right_patch
+
+            IFS='.' read -r left_major left_minor left_patch <<< "${left}"
+            IFS='.' read -r right_major right_minor right_patch <<< "${right}"
+
+            if [ "${left_major}" -gt "${right_major}" ]; then
+              return 0
+            fi
+            if [ "${left_major}" -lt "${right_major}" ]; then
+              return 1
+            fi
+            if [ "${left_minor}" -gt "${right_minor}" ]; then
+              return 0
+            fi
+            if [ "${left_minor}" -lt "${right_minor}" ]; then
+              return 1
+            fi
+            [ "${left_patch}" -gt "${right_patch}" ]
+          }
 
           check_upstream_tag() {
             local out
@@ -269,37 +183,128 @@ jobs:
             exit 1
           fi
 
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "should_build=true" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          fetch_digest() {
+          fetch_built_version_label() {
             local tag="$1"
             local out
             local full_ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}"
+            local inspected_version
 
-            if out="$(docker buildx imagetools inspect "${full_ref}" --format '{{json .Manifest}}' 2>&1)"; then
-              local digest
-              digest="$(echo "${out}" | jq -r '.digest // empty')"
-              if [ -z "${digest}" ]; then
-                echo "Could not read digest for ${full_ref}. Inspect output: ${out}" >&2
-                return 1
+            if docker pull "${full_ref}" >/dev/null 2>&1; then
+              inspected_version="$(
+                docker inspect \
+                  --format '{{ index .Config.Labels "'"${VERSION_LABEL}"'" }}' \
+                  "${full_ref}" 2>/dev/null || true
+              )"
+              if [[ "${inspected_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "${inspected_version}"
               fi
-              echo "${digest}"
               return 0
             fi
 
+            out="$(docker pull "${full_ref}" 2>&1 || true)"
             if echo "${out}" | grep -Eqi "not found|manifest unknown|no such manifest"; then
               return 2
             fi
 
-            echo "Failed to check ${full_ref}: ${out}" >&2
+            echo "Failed to inspect ${full_ref}: ${out}" >&2
             return 1
           }
 
-          if exact_digest="$(fetch_digest "${TARGET_TAG}")"; then
-            echo "Found digest for ${TARGET_TAG}, checking rolling tags."
+          enable_tag() {
+            local tag="$1"
+            local existing_version="$2"
+
+            if [ -z "${existing_version}" ]; then
+              echo "Tag ${tag} has no recorded upstream version label; enabling update."
+              return 0
+            fi
+
+            if semver_gt "${existing_version}" "${TARGET_TAG}"; then
+              echo "Skipping ${tag} because existing label ${existing_version} is newer than ${TARGET_TAG}."
+              return 1
+            fi
+
+            if [ "${existing_version}" != "${TARGET_TAG}" ]; then
+              echo "Tag ${tag} currently maps to ${existing_version}; enabling update to ${TARGET_TAG}."
+            fi
+            return 0
+          }
+
+          enable_major_minor=false
+          enable_major=false
+          enable_latest=false
+          rolling_needs_update=false
+
+          major_minor_version=""
+          if major_minor_version="$(fetch_built_version_label "${TARGET_MAJOR_MINOR}")"; then
+            if enable_tag "${TARGET_MAJOR_MINOR}" "${major_minor_version}"; then
+              enable_major_minor=true
+              if [ "${major_minor_version}" != "${TARGET_TAG}" ]; then
+                rolling_needs_update=true
+              fi
+            fi
+          else
+            status=$?
+            if [ "${status}" -eq 2 ]; then
+              echo "Tag ${TARGET_MAJOR_MINOR} is missing; enabling update."
+              enable_major_minor=true
+              rolling_needs_update=true
+            else
+              exit 1
+            fi
+          fi
+
+          major_version=""
+          if major_version="$(fetch_built_version_label "${TARGET_MAJOR}")"; then
+            if enable_tag "${TARGET_MAJOR}" "${major_version}"; then
+              enable_major=true
+              if [ "${major_version}" != "${TARGET_TAG}" ]; then
+                rolling_needs_update=true
+              fi
+            fi
+          else
+            status=$?
+            if [ "${status}" -eq 2 ]; then
+              echo "Tag ${TARGET_MAJOR} is missing; enabling update."
+              enable_major=true
+              rolling_needs_update=true
+            else
+              exit 1
+            fi
+          fi
+
+          if [ "${TARGET_IS_LATEST}" = "true" ]; then
+            latest_version=""
+            if latest_version="$(fetch_built_version_label "latest")"; then
+              if enable_tag "latest" "${latest_version}"; then
+                enable_latest=true
+                if [ "${latest_version}" != "${TARGET_TAG}" ]; then
+                  rolling_needs_update=true
+                fi
+              fi
+            else
+              status=$?
+              if [ "${status}" -eq 2 ]; then
+                echo "Tag latest is missing; enabling update."
+                enable_latest=true
+                rolling_needs_update=true
+              else
+                exit 1
+              fi
+            fi
+          fi
+
+          echo "enable_major_minor=${enable_major_minor}" >> "${GITHUB_OUTPUT}"
+          echo "enable_major=${enable_major}" >> "${GITHUB_OUTPUT}"
+          echo "enable_latest=${enable_latest}" >> "${GITHUB_OUTPUT}"
+
+          if exact_version="$(fetch_built_version_label "${TARGET_TAG}")"; then
+            if [ -z "${exact_version}" ]; then
+              echo "Version ${TARGET_TAG} exists but has no recorded upstream version label, rebuilding."
+              echo "should_build=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo "Found ${TARGET_TAG} with embedded upstream version label ${exact_version}."
           else
             status=$?
             if [ "${status}" -eq 2 ]; then
@@ -310,30 +315,18 @@ jobs:
             exit 1
           fi
 
-          check_tags=("${TARGET_MAJOR_MINOR}" "${TARGET_MAJOR}")
-          if [ "${TARGET_IS_LATEST}" = "true" ]; then
-            check_tags+=("latest")
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
 
-          for tag in "${check_tags[@]}"; do
-            if tag_digest="$(fetch_digest "${tag}")"; then
-              if [ "${tag_digest}" != "${exact_digest}" ]; then
-                echo "Tag ${tag} digest differs from ${TARGET_TAG}, rebuilding."
-                echo "should_build=true" >> "${GITHUB_OUTPUT}"
-                exit 0
-              fi
-            else
-              status=$?
-              if [ "${status}" -eq 2 ]; then
-                echo "Tag ${tag} is missing, rebuilding."
-                echo "should_build=true" >> "${GITHUB_OUTPUT}"
-                exit 0
-              fi
-              exit 1
-            fi
-          done
+          if [ "${rolling_needs_update}" = "true" ]; then
+            echo "Rolling tags require update, rebuilding."
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
 
-          echo "Version ${TARGET_TAG} and rolling tags are up to date, skipping scheduled build."
+          echo "Version ${TARGET_TAG} and enabled rolling tags are up to date, skipping scheduled build."
           echo "should_build=false" >> "${GITHUB_OUTPUT}"
 
       # Extract metadata (tags, labels) for Docker
@@ -346,9 +339,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ steps.caddy-version.outputs.version }}
-            type=raw,value=${{ steps.caddy-version.outputs.major_minor }},enable=${{ steps.caddy-version.outputs.enable_major_minor == 'true' }}
-            type=raw,value=${{ steps.caddy-version.outputs.major }},enable=${{ steps.caddy-version.outputs.enable_major == 'true' }}
-            type=raw,value=latest,enable=${{ steps.caddy-version.outputs.is_latest == 'true' }}
+            type=raw,value=${{ steps.caddy-version.outputs.major_minor }},enable=${{ steps.build-needed.outputs.enable_major_minor == 'true' }}
+            type=raw,value=${{ steps.caddy-version.outputs.major }},enable=${{ steps.build-needed.outputs.enable_major == 'true' }}
+            type=raw,value=latest,enable=${{ steps.build-needed.outputs.enable_latest == 'true' }}
 
       # Build and push Docker image with Buildx
       # https://github.com/docker/build-push-action
