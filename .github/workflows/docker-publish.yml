@@ -47,31 +47,19 @@ jobs:
           set -euo pipefail
 
           get_latest_version() {
-            python3 - <<'PY'
-            import json
-            import re
-            import urllib.request
+            local latest_tag
+            latest_tag="$(
+              curl -fsSL "https://api.github.com/repos/caddyserver/caddy/releases/latest" \
+                | awk -F'"' '/"tag_name":/ {print $4; exit}'
+            )"
 
-            url = "https://hub.docker.com/v2/repositories/library/caddy/tags?page_size=100&ordering=last_updated"
-            versions = []
-            while url:
-                with urllib.request.urlopen(url) as response:
-                    data = json.load(response)
-                for tag in data.get("results", []):
-                    name = tag.get("name", "")
-                    if re.fullmatch(r"\d+\.\d+\.\d+", name):
-                        versions.append(tuple(int(part) for part in name.split(".")))
-                url = data.get("next")
+            latest_tag="${latest_tag#v}"
+            if [[ ! "${latest_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Could not resolve semantic latest Caddy release tag from GitHub API." >&2
+              return 1
+            fi
 
-            if not versions:
-                raise SystemExit(
-                    "Could not find semantic versions on Docker Hub for library/caddy. "
-                    "Verify Docker Hub connectivity and repository availability."
-                )
-
-            latest = max(versions)
-            print(f"{latest[0]}.{latest[1]}.{latest[2]}")
-            PY
+            echo "${latest_tag}"
           }
 
           requested="${REQUESTED_CADDY_VERSION#v}"
@@ -84,7 +72,7 @@ jobs:
           latest_version="$(get_latest_version)"
 
           if [ -z "${resolved_version}" ] || [ "${resolved_version}" = "null" ]; then
-            echo "Could not resolve a Caddy version from input or Docker Hub upstream tags."
+            echo "Could not resolve a Caddy version from input or GitHub upstream releases."
             exit 1
           fi
 
@@ -137,6 +125,34 @@ jobs:
           TARGET_IS_LATEST: ${{ steps.caddy-version.outputs.is_latest }}
         run: |
           set -euo pipefail
+
+          check_upstream_tag() {
+            local out
+            local upstream_ref="docker.io/library/caddy:${TARGET_TAG}"
+
+            if out="$(docker buildx imagetools inspect "${upstream_ref}" 2>&1)"; then
+              return 0
+            fi
+
+            if echo "${out}" | grep -Eqi "not found|manifest unknown|no such manifest"; then
+              return 2
+            fi
+
+            echo "Failed to check upstream image ${upstream_ref}: ${out}" >&2
+            return 1
+          }
+
+          if check_upstream_tag; then
+            :
+          else
+            status=$?
+            if [ "${status}" -eq 2 ]; then
+              echo "Upstream caddy:${TARGET_TAG} is not available yet on Docker Hub; skipping build for now."
+              echo "should_build=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            exit 1
+          fi
 
           if [ "${{ github.event_name }}" != "schedule" ]; then
             echo "should_build=true" >> "${GITHUB_OUTPUT}"
